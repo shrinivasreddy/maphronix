@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>MAPHRONIX Web</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; padding: 0; font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #e5e7eb; }
+  #layout { display: flex; height: 100vh; }
+
+  /* ── Sidebar ── */
+  #sidebar { width: 320px; padding: 16px; background: #0f172a; border-right: 2px solid #1e293b; overflow-y: auto; }
+  #sidebar h1 { font-size: 18px; color: #4ade80; margin: 0 0 16px; }
+  #drop-zone {
+    border: 2px dashed #4ade80; border-radius: 8px; padding: 24px 12px;
+    text-align: center; cursor: pointer; color: #9ca3af; font-size: 13px;
+  }
+  #drop-zone.dragover { background: #1e293b; }
+  #file-input { display: none; }
+  #upload-btn {
+    width: 100%; margin-top: 10px; padding: 10px; background: #4ade80; color: #0f172a;
+    border: none; border-radius: 6px; font-weight: bold; cursor: pointer;
+  }
+  #upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #status { margin-top: 10px; font-size: 13px; color: #9ca3af; min-height: 18px; }
+  #upload-progress-wrap {
+    display: none; margin-top: 10px; width: 100%; height: 10px;
+    background: #020617; border: 1px solid #334155; border-radius: 999px;
+    overflow: hidden;
+  }
+  #upload-progress-bar {
+    width: 0%; height: 100%; background: #4ade80; transition: width 120ms linear;
+  }
+  #upload-progress-text {
+    display: none; margin-top: 6px; font-size: 12px; color: #9ca3af;
+  }
+
+  #video-list { list-style: none; padding: 0; margin-top: 14px; }
+  #video-list li {
+    padding: 8px 10px; border: 1px solid #334155; border-radius: 6px;
+    margin-bottom: 6px; cursor: pointer; font-size: 13px; word-break: break-all;
+  }
+  #video-list li:hover { background: #1e293b; }
+  #video-list li.nearby { background: #f59e0b; border-color: #f59e0b; color: #000; }
+  #video-list li.active { background: #1d4ed8 !important; border-color: #1d4ed8 !important; color: #fff !important; }
+  #video-list li.error { color: #ef4444; border-color: #ef4444; cursor: default; }
+
+  /* ── Center: video player ── */
+  #player-pane { width: 42%; display: flex; flex-direction: column; background: #000; border-right: 2px solid #1e293b; }
+  #video-wrap { flex: 1; position: relative; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
+  #video-wrap video { max-width: 100%; max-height: 100%; transform-origin: center center; }
+  #placeholder-text { color: #6b7280; font-size: 13px; }
+
+  #telemetry { padding: 6px 10px; font-size: 12px; color: #9ca3af; background: #0f172a; border-top: 1px solid #1e293b; }
+
+  #controls { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px; background: #0f172a; border-top: 1px solid #1e293b; }
+  #controls button, #controls select {
+    background: #1e293b; border: 2px solid #4ade80; border-radius: 6px; color: #e5e7eb;
+    padding: 6px 10px; font-size: 12px; cursor: pointer; font-weight: bold;
+  }
+  #controls button:hover { background: #334155; }
+  #controls button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ── Map ── */
+  #map { flex: 1; }
+</style>
+</head>
+<body>
+
+<div id="layout">
+  <div id="sidebar">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px;">
+      <h1 style="margin:0;">MAPHRONIX Web</h1>
+      <form method="POST" action="/logout">
+        <button type="submit" style="background:#2d0a0a; border:1px solid #ef4444; color:#ef4444; border-radius:6px; padding:5px 10px; font-size:11px; cursor:pointer;">
+          Logout
+        </button>
+      </form>
+    </div>
+    <div style="font-size:12px; color:#9ca3af; margin:-10px 0 14px;">Signed in as {{ username }}</div>
+
+    <div id="drop-zone">
+      Click or drag .mp4 / .mov files here
+    </div>
+    <input id="file-input" type="file" accept=".mp4,.mov" multiple>
+    <button id="upload-btn" disabled>Upload &amp; Extract GPS</button>
+    <div id="upload-progress-wrap" aria-hidden="true">
+      <div id="upload-progress-bar"></div>
+    </div>
+    <div id="upload-progress-text"></div>
+    <div id="status"></div>
+
+    <div style="display:flex; gap:6px; margin-top:10px;">
+      <button id="reset-map-btn" style="flex:1; padding:8px; background:#1e293b; border:2px solid #4ade80; border-radius:6px; color:#e5e7eb; font-weight:bold; cursor:pointer; font-size:12px;">
+        &#128260; Reset Map
+      </button>
+      <button id="full-reset-btn" style="flex:1; padding:8px; background:#2d0a0a; border:2px solid #ef4444; border-radius:6px; color:#ef4444; font-weight:bold; cursor:pointer; font-size:12px;">
+        &#128465; Full Reset
+      </button>
+    </div>
+
+    <ul id="video-list"></ul>
+
+    <div style="margin-top: 16px;">
+      <label style="font-size: 12px; color: #9ca3af;">Find by Coordinates:</label>
+      <input id="coord-input" type="text" placeholder="20.512, 85.845  or  20°30'15&quot;N 85°50'44&quot;E"
+             style="width: 100%; margin-top: 6px; padding: 8px; background: #020617; border: 1px solid #4ade80; color: #fff; border-radius: 4px; font-size: 12px;">
+      <button id="search-coord-btn" style="width: 100%; margin-top: 6px; padding: 8px; background: #1e293b; border: 2px solid #4ade80; border-radius: 6px; color: #e5e7eb; font-weight: bold; cursor: pointer;">
+        &#128205; Search Nearby Videos
+      </button>
+      <div id="search-status" style="font-size: 12px; color: #ef4444; margin-top: 6px;"></div>
+    </div>
+  </div>
+
+  <div id="player-pane">
+    <div id="video-wrap">
+      <span id="placeholder-text">Select a video from the list to play it</span>
+    </div>
+    <div id="telemetry">Distance: 0 m | Time: 0 s</div>
+    <div id="controls">
+      <button id="play-pause-btn" disabled>&#9654; Play</button>
+      <button id="back3-btn" disabled>&#9194; Back 3s</button>
+      <button id="prev-frame-btn" disabled>&#8592; Prev Frame</button>
+      <button id="next-frame-btn" disabled>&#8594; Next Frame</button>
+      <button id="reset-zoom-btn" disabled>&#128269; Reset Zoom</button>
+      <select id="speed-select" disabled>
+        <option value="1">1x</option>
+        <option value="2">2x</option>
+        <option value="5">5x</option>
+        <option value="10">10x</option>
+      </select>
+      <button id="screenshot-btn" disabled>&#128247; Screenshot HD (5312&times;2988)</button>
+    </div>
+  </div>
+
+  <div id="map"></div>
+</div>
+
+<script>
+// ════════════════════════════════════════════
+//  LEAFLET MAP  (ported from the desktop app's map_html())
+// ════════════════════════════════════════════
+var leafletMap = L.map('map', { zoomControl: true, attributionControl: false }).setView([0, 0], 2);
+
+// Note: this uses Google's raw tile endpoint directly, same as the original
+// desktop app. For a production deployment, prefer an official tile provider
+// (Google Maps Platform with an API key + billing, Mapbox, or Esri) so you
+// stay within that provider's terms of service.
+L.tileLayer('https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
+  subdomains: ['0','1','2','3'],
+  maxZoom: 21
+}).addTo(leafletMap);
+
+function makeGooglePin(color) {
+  color = color || '#EA4335';
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="28" height="40" viewBox="0 0 28 40">'
+    + '<defs><radialGradient id="pg" cx="40%" cy="35%" r="60%">'
+    + '<stop offset="0%" style="stop-color:#ff7b72"/>'
+    + '<stop offset="100%" style="stop-color:' + color + '"/>'
+    + '</radialGradient></defs>'
+    + '<path d="M14 0C6.268 0 0 6.268 0 14c0 10.5 14 26 14 26s14-15.5 14-26C28 6.268 21.732 0 14 0z"'
+    + ' fill="url(#pg)" stroke="#c5271a" stroke-width="1"/>'
+    + '<circle cx="14" cy="14" r="6" fill="white" opacity="0.95"/>'
+    + '<circle cx="14" cy="14" r="2.5" fill="' + color + '"/>'
+    + '</svg>';
+  return L.divIcon({
+    html: '<div style="filter:drop-shadow(0 4px 5px rgba(0,0,0,0.45))">' + svg + '</div>',
+    iconSize: [28, 40], iconAnchor: [14, 40], className: ''
+  });
+}
+
+// ── Blue search pin icon (distinct from the red video-position pin) ──
+function makeSearchPin() {
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="46" viewBox="0 0 32 46">'
+    + '<defs><radialGradient id="spg" cx="40%" cy="35%" r="60%">'
+    + '<stop offset="0%" style="stop-color:#93c5fd"/>'
+    + '<stop offset="100%" style="stop-color:#2563eb"/>'
+    + '</radialGradient></defs>'
+    + '<path d="M16 0C7.163 0 0 7.163 0 16c0 12 16 30 16 30s16-18 16-30C32 7.163 24.837 0 16 0z"'
+    + ' fill="url(#spg)" stroke="#1d4ed8" stroke-width="1.5"/>'
+    + '<circle cx="16" cy="16" r="7" fill="white" opacity="0.95"/>'
+    + '<circle cx="16" cy="16" r="3" fill="#2563eb"/>'
+    + '</svg>';
+  return L.divIcon({
+    html: '<div style="filter:drop-shadow(0 5px 8px rgba(37,99,235,0.55))">' + svg + '</div>',
+    iconSize: [32, 46], iconAnchor: [16, 46], className: ''
+  });
+}
+
+var blueLayer   = L.featureGroup().addTo(leafletMap);
+var activeLayer = L.featureGroup().addTo(leafletMap);
+var pin         = L.marker([0, 0], { icon: makeGooglePin('#EA4335'), zIndexOffset: 1000 }).addTo(leafletMap);
+var searchPin   = null;
+
+function updatePin(lat, lon) { pin.setLatLng([lat, lon]); }
+
+function setSearchPin(lat, lon) {
+  if (searchPin) leafletMap.removeLayer(searchPin);
+  searchPin = L.marker([lat, lon], { icon: makeSearchPin(), zIndexOffset: 2000 }).addTo(leafletMap);
+  searchPin.bindPopup(
+    '<b style="color:#2563eb">Searched Location</b><br>' + lat.toFixed(6) + ', ' + lon.toFixed(6)
+  ).openPopup();
+}
+
+function clearSearchPin() {
+  if (searchPin) { leafletMap.removeLayer(searchPin); searchPin = null; }
+}
+
+function clearMap() { blueLayer.clearLayers(); activeLayer.clearLayers(); clearSearchPin(); }
+
+function addPath(pts) {
+  if (!pts.length) return;
+  L.polyline(pts.map(function(p){ return [p.lat, p.lon]; }),
+    { color: '#15803d', weight: 2, opacity: 0.6 }).addTo(blueLayer);
+  leafletMap.fitBounds(blueLayer.getBounds());
+}
+
+function setIsolateActive(pts) {
+  activeLayer.clearLayers();
+  if (!pts.length) return;
+  L.polyline(pts.map(function(p){ return [p.lat, p.lon]; }),
+    { color: '#4ade80', weight: 5 }).addTo(activeLayer);
+  leafletMap.fitBounds(activeLayer.getBounds());
+}
+
+// ════════════════════════════════════════════
+//  UPLOAD + GPS EXTRACTION
+// ════════════════════════════════════════════
+var dropZone   = document.getElementById('drop-zone');
+var fileInput  = document.getElementById('file-input');
+var uploadBtn  = document.getElementById('upload-btn');
+var progressWrap = document.getElementById('upload-progress-wrap');
+var progressBar  = document.getElementById('upload-progress-bar');
+var progressText = document.getElementById('upload-progress-text');
+var statusEl   = document.getElementById('status');
+var videoList  = document.getElementById('video-list');
+
+var videoGpsCache = {};   // video id -> [{lat, lon}, ...]
+var selectedFiles = null;
+var activeVideoId = null;
+
+dropZone.addEventListener('click', function () { fileInput.click(); });
+
+dropZone.addEventListener('dragover', function (e) {
+  e.preventDefault(); dropZone.classList.add('dragover');
+});
+dropZone.addEventListener('dragleave', function () { dropZone.classList.remove('dragover'); });
+dropZone.addEventListener('drop', function (e) {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+  setFiles(e.dataTransfer.files);
+});
+
+fileInput.addEventListener('change', function () { setFiles(fileInput.files); });
+
+function setFiles(fileListObj) {
+  selectedFiles = fileListObj;
+  uploadBtn.disabled = !(fileListObj && fileListObj.length);
+  resetUploadProgress();
+  dropZone.textContent = fileListObj && fileListObj.length
+    ? fileListObj.length + ' file(s) selected'
+    : 'Click or drag .mp4 / .mov files here';
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  var size = bytes;
+  var unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex++;
+  }
+  return size.toFixed(unitIndex === 0 ? 0 : 1) + ' ' + units[unitIndex];
+}
+
+function resetUploadProgress() {
+  progressWrap.style.display = 'none';
+  progressWrap.setAttribute('aria-hidden', 'true');
+  progressBar.style.width = '0%';
+  progressText.style.display = 'none';
+  progressText.textContent = '';
+}
+
+function setUploadProgress(loaded, total) {
+  progressWrap.style.display = 'block';
+  progressWrap.setAttribute('aria-hidden', 'false');
+  progressText.style.display = 'block';
+
+  if (total) {
+    var percent = Math.min(100, Math.max(0, Math.round((loaded / total) * 100)));
+    progressBar.style.width = percent + '%';
+    progressText.textContent = percent + '% uploaded (' + formatBytes(loaded) + ' of ' + formatBytes(total) + ')';
+  } else {
+    progressBar.style.width = '100%';
+    progressText.textContent = formatBytes(loaded) + ' uploaded';
+  }
+}
+
+function parseUploadResponse(xhr) {
+  var text = xhr.responseText || '';
+  var data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (e) {
+      data = { error: text.slice(0, 300) };
+    }
+  }
+  if (xhr.status < 200 || xhr.status >= 300) {
+    throw new Error(data.error || ('Server returned HTTP ' + xhr.status));
+  }
+  return data;
+}
+
+uploadBtn.addEventListener('click', function () {
+  if (!selectedFiles || !selectedFiles.length) return;
+
+  var formData = new FormData();
+  for (var i = 0; i < selectedFiles.length; i++) {
+    formData.append('videos', selectedFiles[i]);
+  }
+
+  uploadBtn.disabled = true;
+  setUploadProgress(0, Array.prototype.reduce.call(selectedFiles, function (sum, file) {
+    return sum + file.size;
+  }, 0));
+  statusEl.textContent = 'Uploading...';
+
+  var xhr = new XMLHttpRequest();
+  xhr.open('POST', '/upload');
+
+  xhr.upload.onprogress = function (event) {
+    if (event.lengthComputable) {
+      setUploadProgress(event.loaded, event.total);
+    } else {
+      setUploadProgress(event.loaded, 0);
+    }
+  };
+
+  xhr.onload = function () {
+    try {
+      var data = parseUploadResponse(xhr);
+      progressBar.style.width = '100%';
+      progressText.textContent = '100% uploaded. Extracting GPS completed.';
+      statusEl.textContent = '';
+      (data.results || []).forEach(handleResult);
+    } catch (err) {
+      statusEl.textContent = 'Upload failed: ' + (err && err.message ? err.message : err)
+        + '. For 10 GB videos, also check any reverse proxy limit and server timeout in front of Flask.';
+    } finally {
+      uploadBtn.disabled = false;
+    }
+  };
+
+  xhr.onerror = function () {
+    statusEl.textContent = 'Upload failed: network connection lost or the server closed the request. For 10 GB videos, check proxy upload limits and timeouts.';
+    uploadBtn.disabled = false;
+  };
+
+  xhr.onabort = function () {
+    statusEl.textContent = 'Upload cancelled.';
+    uploadBtn.disabled = false;
+  };
+
+  xhr.send(formData);
+});
+
+function handleResult(result) {
+  var li = document.createElement('li');
+  li.textContent = result.filename;
+
+  if (result.error) {
+    li.textContent += '  —  ' + result.error;
+    li.classList.add('error');
+    videoList.appendChild(li);
+    return;
+  }
+
+  videoGpsCache[result.id] = result.points;
+  li.textContent += '  (' + result.point_count + ' GPS points)';
+
+  li.addEventListener('click', function () {
+    document.querySelectorAll('#video-list li').forEach(function (el) { el.classList.remove('active'); });
+    li.classList.add('active');
+    activeVideoId = result.id;
+    setIsolateActive(videoGpsCache[result.id] || []);
+    loadVideo(result.id);
+  });
+
+  videoList.appendChild(li);
+  videoLiById[result.id] = li;
+
+  if (result.points && result.points.length) {
+    addPath(result.points);
+  }
+}
+
+// ════════════════════════════════════════════
+//  PHASE 2: VIDEO PLAYBACK SYNCED TO THE MAP
+//  (ported from next_frame / toggle_playback / backward_3_seconds /
+//   backward_one_frame / forward_one_frame / track_zoom / track_speed)
+// ════════════════════════════════════════════
+var videoWrap    = document.getElementById('video-wrap');
+var telemetryEl  = document.getElementById('telemetry');
+var playPauseBtn = document.getElementById('play-pause-btn');
+var back3Btn     = document.getElementById('back3-btn');
+var prevFrameBtn = document.getElementById('prev-frame-btn');
+var nextFrameBtn = document.getElementById('next-frame-btn');
+var resetZoomBtn = document.getElementById('reset-zoom-btn');
+var speedSelect  = document.getElementById('speed-select');
+var screenshotBtn = document.getElementById('screenshot-btn');
+
+var currentVideoEl = null;
+var currentPts = [];
+var zoomFactor = 1.0;
+var ASSUMED_FPS = 30; // used only for "1 frame" stepping; browsers don't expose real frame count
+
+function haversine(lat1, lon1, lat2, lon2) {
+  var R = 6371000;
+  var dphi = (lat2 - lat1) * Math.PI / 180;
+  var dl   = (lon2 - lon1) * Math.PI / 180;
+  var a = Math.sin(dphi/2) ** 2
+        + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dl/2) ** 2;
+  return 2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function setControlsEnabled(enabled) {
+  [playPauseBtn, back3Btn, prevFrameBtn, nextFrameBtn, resetZoomBtn, speedSelect, screenshotBtn]
+    .forEach(function (el) { el.disabled = !enabled; });
+}
+
+function loadVideo(id) {
+  currentPts = videoGpsCache[id] || [];
+  zoomFactor = 1.0;
+
+  videoWrap.innerHTML = '';
+  var video = document.createElement('video');
+  video.src = '/video/' + encodeURIComponent(id);
+  video.controls = false;
+  video.style.transform = 'scale(1)';
+  videoWrap.appendChild(video);
+  currentVideoEl = video;
+
+  video.addEventListener('timeupdate', syncMapToVideo);
+  video.addEventListener('play',  function () { playPauseBtn.innerHTML = '&#10074;&#10074; Pause'; });
+  video.addEventListener('pause', function () { playPauseBtn.innerHTML = '&#9654; Play'; });
+  video.addEventListener('wheel', onVideoWheelZoom, { passive: false });
+
+  setControlsEnabled(true);
+  video.play();
+}
+
+function syncMapToVideo() {
+  if (!currentVideoEl || !currentPts.length || !currentVideoEl.duration) return;
+  var ratio = currentVideoEl.currentTime / currentVideoEl.duration;
+  var idx = Math.max(0, Math.min(currentPts.length - 1, Math.floor(ratio * (currentPts.length - 1))));
+  var p = currentPts[idx];
+  if (p) updatePin(p.lat, p.lon);
+
+  var dist = 0;
+  for (var i = 0; i < idx; i++) {
+    dist += haversine(currentPts[i].lat, currentPts[i].lon, currentPts[i+1].lat, currentPts[i+1].lon);
+  }
+  telemetryEl.textContent = 'Distance: ' + dist.toFixed(1) + ' m | Time: ' + currentVideoEl.currentTime.toFixed(1) + ' s';
+}
+
+playPauseBtn.addEventListener('click', function () {
+  if (!currentVideoEl) return;
+  if (currentVideoEl.paused) currentVideoEl.play(); else currentVideoEl.pause();
+});
+
+back3Btn.addEventListener('click', function () {
+  if (!currentVideoEl) return;
+  currentVideoEl.currentTime = Math.max(0, currentVideoEl.currentTime - 3);
+});
+
+prevFrameBtn.addEventListener('click', function () {
+  if (!currentVideoEl) return;
+  var wasPlaying = !currentVideoEl.paused;
+  currentVideoEl.pause();
+  currentVideoEl.currentTime = Math.max(0, currentVideoEl.currentTime - (1 / ASSUMED_FPS));
+  if (wasPlaying) currentVideoEl.play();
+});
+
+nextFrameBtn.addEventListener('click', function () {
+  if (!currentVideoEl) return;
+  var wasPlaying = !currentVideoEl.paused;
+  currentVideoEl.pause();
+  currentVideoEl.currentTime = Math.min(currentVideoEl.duration || 0, currentVideoEl.currentTime + (1 / ASSUMED_FPS));
+  if (wasPlaying) currentVideoEl.play();
+});
+
+speedSelect.addEventListener('change', function () {
+  if (!currentVideoEl) return;
+  currentVideoEl.playbackRate = parseFloat(speedSelect.value);
+});
+
+resetZoomBtn.addEventListener('click', function () {
+  zoomFactor = 1.0;
+  if (currentVideoEl) currentVideoEl.style.transform = 'scale(1)';
+});
+
+function onVideoWheelZoom(e) {
+  e.preventDefault();
+  var step = e.deltaY < 0 ? 1.1 : 0.9;
+  zoomFactor = Math.max(1.0, Math.min(zoomFactor * step, 10.0));
+  currentVideoEl.style.transform = 'scale(' + zoomFactor + ')';
+}
+
+// ════════════════════════════════════════════
+//  PHASE 3a: HD SCREENSHOT (ported from take_hd_screenshot)
+// ════════════════════════════════════════════
+// Note: the desktop app captured the GoPro's native decoded frame and scaled
+// it to exactly 5312x2988. The browser gives us the same decoded frame via
+// video.videoWidth/videoHeight, so we draw that onto a 5312x2988 canvas.
+// The actual sharpness ceiling is still whatever resolution the video itself
+// was recorded at -- scaling up doesn't add detail that wasn't there.
+var TARGET_W = 5312, TARGET_H = 2988;
+
+screenshotBtn.addEventListener('click', function () {
+  if (!currentVideoEl || !currentVideoEl.videoWidth) {
+    alert('No video frame loaded yet. Play a video first.');
+    return;
+  }
+  var canvas = document.createElement('canvas');
+  canvas.width = TARGET_W;
+  canvas.height = TARGET_H;
+  var ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(currentVideoEl, 0, 0, TARGET_W, TARGET_H);
+
+  canvas.toBlob(function (blob) {
+    var ts = new Date().toISOString().replace(/[:.]/g, '-');
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'maphronix_' + ts + '.png';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  }, 'image/png');
+});
+
+// ════════════════════════════════════════════
+//  PHASE 3b: COORDINATE SEARCH (ported from parse_latlon / search_by_coords /
+//  highlight_nearby)
+// ════════════════════════════════════════════
+var coordInput     = document.getElementById('coord-input');
+var searchBtn      = document.getElementById('search-coord-btn');
+var searchStatusEl = document.getElementById('search-status');
+var videoLiById    = {}; // video id -> <li> element, filled in handleResult
+
+function parseLatLon(text) {
+  var raw = text.trim().replace(/(lat(itude)?|lon(gitude)?|lng)\s*[:=]?\s*/gi, ' ').trim();
+
+  function dmsToDec(deg, min, sec, hemi) {
+    var val = parseFloat(deg) + parseFloat(min) / 60 + parseFloat(sec) / 3600;
+    if (/[SW]/i.test(hemi)) val = -val;
+    return val;
+  }
+
+  // Full DMS: 20°30'15.6"N, 85°50'44.2"E
+  var dmsFull = raw.match(
+    /(\d{1,3})[°\s]+(\d{1,2})['′\s]+(\d{1,2}(?:\.\d+)?)["″\s]*([NSns]?)[\s,]*(\d{1,3})[°\s]+(\d{1,2})['′\s]+(\d{1,2}(?:\.\d+)?)["″\s]*([EWew]?)/
+  );
+  if (dmsFull) {
+    var latH = dmsFull[4] || 'N', lonH = dmsFull[8] || 'E';
+    return {
+      lat: dmsToDec(dmsFull[1], dmsFull[2], dmsFull[3], latH),
+      lon: dmsToDec(dmsFull[5], dmsFull[6], dmsFull[7], lonH)
+    };
+  }
+
+  // Compact DMS: 203015N 855044E
+  var dmsCompact = raw.match(/(\d{2})(\d{2})(\d{2}(?:\.\d+)?)([NSns])[\s,]*(\d{2,3})(\d{2})(\d{2}(?:\.\d+)?)([EWew])/);
+  if (dmsCompact) {
+    return {
+      lat: dmsToDec(dmsCompact[1], dmsCompact[2], dmsCompact[3], dmsCompact[4]),
+      lon: dmsToDec(dmsCompact[5], dmsCompact[6], dmsCompact[7], dmsCompact[8])
+    };
+  }
+
+  // Decimal pair: 20.512345, 85.845678  (optional N/S/E/W suffixes)
+  var decPair = raw.match(/([+-]?\d{1,3}(?:\.\d+)?)\s*°?\s*([NSns])?\s*[,;\s]\s*([+-]?\d{1,3}(?:\.\d+)?)\s*°?\s*([EWew])?/);
+  if (decPair) {
+    var lat = parseFloat(decPair[1]);
+    var lon = parseFloat(decPair[3]);
+    if (decPair[2] && decPair[2].toUpperCase() === 'S') lat = -Math.abs(lat);
+    if (decPair[4] && decPair[4].toUpperCase() === 'W') lon = -Math.abs(lon);
+    return { lat: lat, lon: lon };
+  }
+
+  // Last resort: first two numbers in the string
+  var nums = raw.match(/[+-]?\d{1,3}(?:\.\d+)?/g);
+  if (nums && nums.length >= 2) {
+    return { lat: parseFloat(nums[0]), lon: parseFloat(nums[1]) };
+  }
+
+  throw new Error('Cannot parse coordinates');
+}
+
+function highlightNearby(lat, lon) {
+  Object.keys(videoLiById).forEach(function (id) {
+    var li = videoLiById[id];
+    if (id === activeVideoId) return; // keep the active video's blue highlight, never override it
+    var pts = videoGpsCache[id] || [];
+    // Check every 10th point, same sampling the desktop app used for speed
+    var isNear = pts.filter(function (_, i) { return i % 10 === 0; })
+                     .some(function (p) { return haversine(lat, lon, p.lat, p.lon) < 15; });
+    li.classList.toggle('nearby', isNear);
+  });
+}
+
+// Ported from jump_to_location: seek the active video to whichever GPS point
+// is closest to the clicked coordinate.
+function jumpToLocation(lat, lon) {
+  if (!currentVideoEl || !currentPts.length || !currentVideoEl.duration) return;
+  var bestIdx = 0, bestDist = Infinity;
+  for (var i = 0; i < currentPts.length; i++) {
+    var d = haversine(lat, lon, currentPts[i].lat, currentPts[i].lon);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  var ratio = bestIdx / (currentPts.length - 1);
+  currentVideoEl.currentTime = ratio * currentVideoEl.duration;
+}
+
+function runCoordinateSearch() {
+  var text = coordInput.value;
+  searchStatusEl.textContent = '';
+  try {
+    var ll = parseLatLon(text);
+    if (ll.lat < -90 || ll.lat > 90 || ll.lon < -180 || ll.lon > 180) {
+      throw new Error('Coordinates out of range');
+    }
+    highlightNearby(ll.lat, ll.lon);
+    leafletMap.setView([ll.lat, ll.lon], 15);
+    setSearchPin(ll.lat, ll.lon);
+  } catch (e) {
+    searchStatusEl.textContent = 'Could not parse coordinates. Try formats like '
+      + '"20.512, 85.845" or "20°30\'15\\"N 85°50\'44\\"E".';
+  }
+}
+
+searchBtn.addEventListener('click', runCoordinateSearch);
+coordInput.addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') runCoordinateSearch();
+});
+
+// Ported from handle_map_click: if a video is active, clicking the map seeks
+// its playback to that location; otherwise it searches for nearby videos.
+leafletMap.on('click', function (e) {
+  if (activeVideoId) {
+    jumpToLocation(e.latlng.lat, e.latlng.lng);
+  } else {
+    highlightNearby(e.latlng.lat, e.latlng.lng);
+  }
+});
+
+// ════════════════════════════════════════════
+//  RESET MAP / FULL RESET (ported from reset_map / full_reset)
+// ════════════════════════════════════════════
+document.getElementById('reset-map-btn').addEventListener('click', function () {
+  activeVideoId = null;
+  document.querySelectorAll('#video-list li').forEach(function (el) {
+    el.classList.remove('active', 'nearby');
+  });
+  activeLayer.clearLayers();
+  showAllPaths();
+});
+
+document.getElementById('full-reset-btn').addEventListener('click', function () {
+  if (!confirm('This clears all uploaded videos and the map. Continue?')) return;
+  activeVideoId = null;
+  videoGpsCache = {};
+  videoLiById = {};
+  videoList.innerHTML = '';
+  videoWrap.innerHTML = '<span id="placeholder-text">Select a video from the list to play it</span>';
+  currentVideoEl = null;
+  currentPts = [];
+  telemetryEl.textContent = 'Distance: 0 m | Time: 0 s';
+  setControlsEnabled(false);
+  clearMap();
+  coordInput.value = '';
+  searchStatusEl.textContent = '';
+});
+
+function showAllPaths() { if (!leafletMap.hasLayer(blueLayer)) blueLayer.addTo(leafletMap); }
+</script>
+</body>
+</html>

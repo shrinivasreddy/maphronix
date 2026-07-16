@@ -1,0 +1,10 @@
+.env
+uploads/
+__pycache__/
+*.py[cod]
+.agents/
+.codex/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
