@@ -5,6 +5,7 @@ __pycache__/
 .agents/
 .codex/
 *.log
+maphronix_activity_log.txt
 *.tmp
 .DS_Store
 Thumbs.db

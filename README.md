@@ -14,8 +14,11 @@ login.
 - Play/Pause, Back 3s, Prev/Next Frame, playback speed, and scroll-to-zoom
 - Configurable HD screenshot export
 - Coordinate search with nearby-video highlighting
-- Login gate with optional email notifications 
+- Login gate with optional email notifications
 - Large-upload support with browser upload progress
+- Pause/resume upload between chunks
+- Resizable sidebar, video panel, and map panel
+- 3D-style tilted map view toggle
 
 ## Security
 
@@ -70,9 +73,12 @@ rotate those credentials before deploying:
 ## Large Uploads
 
 - `MAX_UPLOAD_SIZE` controls the maximum request size.
+- `CHUNK_SIZE_BYTES` controls the upload chunk size used for pause/resume.
 - `EXIFTOOL_TIMEOUT_SECONDS` controls how long GPS extraction may run.
 - If this app is behind Nginx, Apache, IIS, Cloudflare, or another proxy, that
   layer must also allow the same body size and a long enough request timeout.
+- Upload pause/resume happens between chunks. If you pause while a chunk is
+  in flight, the browser cancels that chunk and retries it when you resume.
 
 ## Notes
 
@@ -83,3 +89,5 @@ rotate those credentials before deploying:
 - Screenshot dimensions are controlled by `SCREENSHOT_WIDTH` and
   `SCREENSHOT_HEIGHT`.
 - Map and frontend provider URLs are configurable in `.env`.
+- The 3D map button applies a tilted Leaflet view. For true terrain or 3D
+  buildings, configure a provider/library that supports those features.

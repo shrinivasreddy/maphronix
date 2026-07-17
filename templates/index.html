@@ -6,12 +6,22 @@
 <link rel="stylesheet" href="{{ frontend_config.leafletCssUrl }}"/>
 <script src="{{ frontend_config.leafletJsUrl }}"></script>
 <style>
+  :root { --sidebar-width: 320px; --player-width: 42vw; }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; padding: 0; font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #e5e7eb; }
-  #layout { display: flex; height: 100vh; }
+  #layout {
+    display: grid;
+    grid-template-columns: var(--sidebar-width) 6px minmax(280px, var(--player-width)) 6px minmax(320px, 1fr);
+    height: 100vh;
+    overflow: hidden;
+  }
+  .resizer { width: 6px; background: #1e293b; cursor: col-resize; position: relative; }
+  .resizer::after { content: ''; position: absolute; left: 2px; top: 0; bottom: 0; width: 2px; background: #334155; }
+  .resizer:hover::after, .resizer.dragging::after { background: #4ade80; }
+  body.resizing { cursor: col-resize; user-select: none; }
 
   /* ── Sidebar ── */
-  #sidebar { width: 320px; padding: 16px; background: #0f172a; border-right: 2px solid #1e293b; overflow-y: auto; }
+  #sidebar { padding: 16px; background: #0f172a; overflow-y: auto; min-width: 0; }
   #sidebar h1 { font-size: 18px; color: #4ade80; margin: 0 0 16px; }
   #drop-zone {
     border: 2px dashed #4ade80; border-radius: 8px; padding: 24px 12px;
@@ -19,11 +29,12 @@
   }
   #drop-zone.dragover { background: #1e293b; }
   #file-input { display: none; }
-  #upload-btn {
+  #upload-btn, #pause-upload-btn {
     width: 100%; margin-top: 10px; padding: 10px; background: #4ade80; color: #0f172a;
     border: none; border-radius: 6px; font-weight: bold; cursor: pointer;
   }
-  #upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #pause-upload-btn { background: #1e293b; border: 2px solid #4ade80; color: #e5e7eb; }
+  #upload-btn:disabled, #pause-upload-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   #status { margin-top: 10px; font-size: 13px; color: #9ca3af; min-height: 18px; }
   #upload-progress-wrap {
     display: none; margin-top: 10px; width: 100%; height: 10px;
@@ -48,7 +59,7 @@
   #video-list li.error { color: #ef4444; border-color: #ef4444; cursor: default; }
 
   /* ── Center: video player ── */
-  #player-pane { width: 42%; display: flex; flex-direction: column; background: #000; border-right: 2px solid #1e293b; }
+  #player-pane { min-width: 0; display: flex; flex-direction: column; background: #000; }
   #video-wrap { flex: 1; position: relative; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
   #video-wrap video { max-width: 100%; max-height: 100%; transform-origin: center center; }
   #placeholder-text { color: #6b7280; font-size: 13px; }
@@ -64,7 +75,14 @@
   #controls button:disabled { opacity: 0.4; cursor: not-allowed; }
 
   /* ── Map ── */
-  #map { flex: 1; }
+  #map {
+    min-width: 0; overflow: hidden; transition: transform 180ms ease, box-shadow 180ms ease;
+    transform-origin: center bottom;
+  }
+  #map.map-3d {
+    transform: perspective(1200px) rotateX(16deg) scale(1.04);
+    box-shadow: 0 -18px 35px rgba(0, 0, 0, 0.35) inset;
+  }
 </style>
 </head>
 <body>
@@ -86,6 +104,7 @@
     </div>
     <input id="file-input" type="file" accept=".mp4,.mov" multiple>
     <button id="upload-btn" disabled>Upload &amp; Extract GPS</button>
+    <button id="pause-upload-btn" disabled>Pause Upload</button>
     <div id="upload-progress-wrap" aria-hidden="true">
       <div id="upload-progress-bar"></div>
     </div>
@@ -100,6 +119,9 @@
         &#128465; Full Reset
       </button>
     </div>
+    <button id="toggle-3d-btn" style="width:100%; margin-top:6px; padding:8px; background:#1e293b; border:2px solid #4ade80; border-radius:6px; color:#e5e7eb; font-weight:bold; cursor:pointer; font-size:12px;">
+      3D Map View
+    </button>
 
     <ul id="video-list"></ul>
 
@@ -113,6 +135,8 @@
       <div id="search-status" style="font-size: 12px; color: #ef4444; margin-top: 6px;"></div>
     </div>
   </div>
+
+  <div id="sidebar-resizer" class="resizer" title="Resize sidebar"></div>
 
   <div id="player-pane">
     <div id="video-wrap">
@@ -137,6 +161,8 @@
     </div>
   </div>
 
+  <div id="map-resizer" class="resizer" title="Resize video and map"></div>
+
   <div id="map"></div>
 </div>
 
@@ -155,6 +181,54 @@ L.tileLayer(APP_CONFIG.mapTileUrl, {
   subdomains: APP_CONFIG.mapTileSubdomains,
   maxZoom: APP_CONFIG.mapTileMaxZoom
 }).addTo(leafletMap);
+
+document.getElementById('toggle-3d-btn').addEventListener('click', function () {
+  var mapEl = document.getElementById('map');
+  var enabled = mapEl.classList.toggle('map-3d');
+  this.textContent = enabled ? '2D Map View' : '3D Map View';
+  setTimeout(function () { leafletMap.invalidateSize(); }, 150);
+});
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function setupLayoutResizer(handleId, mode) {
+  var handle = document.getElementById(handleId);
+  var layout = document.getElementById('layout');
+  handle.addEventListener('mousedown', function (event) {
+    event.preventDefault();
+    handle.classList.add('dragging');
+    document.body.classList.add('resizing');
+
+    function onMove(moveEvent) {
+      var rect = layout.getBoundingClientRect();
+      if (mode === 'sidebar') {
+        var sidebarWidth = clamp(moveEvent.clientX - rect.left, 220, rect.width - 640);
+        document.documentElement.style.setProperty('--sidebar-width', sidebarWidth + 'px');
+      } else {
+        var sidebarWidthNow = document.getElementById('sidebar').getBoundingClientRect().width;
+        var playerWidth = clamp(moveEvent.clientX - rect.left - sidebarWidthNow - 12, 280, rect.width - sidebarWidthNow - 340);
+        document.documentElement.style.setProperty('--player-width', playerWidth + 'px');
+      }
+      leafletMap.invalidateSize();
+    }
+
+    function onUp() {
+      handle.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      leafletMap.invalidateSize();
+    }
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+setupLayoutResizer('sidebar-resizer', 'sidebar');
+setupLayoutResizer('map-resizer', 'map');
 
 function makeGooglePin(color) {
   color = color || '#EA4335';
@@ -234,6 +308,7 @@ function setIsolateActive(pts) {
 var dropZone   = document.getElementById('drop-zone');
 var fileInput  = document.getElementById('file-input');
 var uploadBtn  = document.getElementById('upload-btn');
+var pauseUploadBtn = document.getElementById('pause-upload-btn');
 var progressWrap = document.getElementById('upload-progress-wrap');
 var progressBar  = document.getElementById('upload-progress-bar');
 var progressText = document.getElementById('upload-progress-text');
@@ -243,6 +318,12 @@ var videoList  = document.getElementById('video-list');
 var videoGpsCache = {};   // video id -> [{lat, lon}, ...]
 var selectedFiles = null;
 var activeVideoId = null;
+var uploadState = {
+  running: false,
+  paused: false,
+  currentXhr: null,
+  resumeWaiters: []
+};
 
 dropZone.addEventListener('click', function () { fileInput.click(); });
 
@@ -259,7 +340,8 @@ fileInput.addEventListener('change', function () { setFiles(fileInput.files); })
 
 function setFiles(fileListObj) {
   selectedFiles = fileListObj;
-  uploadBtn.disabled = !(fileListObj && fileListObj.length);
+  uploadBtn.disabled = uploadState.running || !(fileListObj && fileListObj.length);
+  pauseUploadBtn.disabled = true;
   resetUploadProgress();
   dropZone.textContent = fileListObj && fileListObj.length
     ? fileListObj.length + ' file(s) selected'
@@ -317,57 +399,138 @@ function parseUploadResponse(xhr) {
   return data;
 }
 
-uploadBtn.addEventListener('click', function () {
+function requestJson(method, url, payload) {
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    xhr.open(method, url);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.onload = function () {
+      try {
+        resolve(parseUploadResponse(xhr));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    xhr.onerror = function () { reject(new Error('Network error')); };
+    xhr.send(JSON.stringify(payload || {}));
+  });
+}
+
+function sendChunk(uploadId, file, offset, end) {
+  return new Promise(function (resolve, reject) {
+    var xhr = new XMLHttpRequest();
+    uploadState.currentXhr = xhr;
+    xhr.open('POST', '/upload/chunk');
+    xhr.setRequestHeader('X-Upload-Id', uploadId);
+    xhr.setRequestHeader('X-Chunk-Offset', String(offset));
+    xhr.onload = function () {
+      uploadState.currentXhr = null;
+      try {
+        resolve(parseUploadResponse(xhr));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    xhr.onerror = function () {
+      uploadState.currentXhr = null;
+      reject(new Error('Network error'));
+    };
+    xhr.onabort = function () {
+      uploadState.currentXhr = null;
+      resolve({ aborted: true, received: offset });
+    };
+    xhr.send(file.slice(offset, end));
+  });
+}
+
+function waitForResume() {
+  if (!uploadState.paused) return Promise.resolve();
+  return new Promise(function (resolve) {
+    uploadState.resumeWaiters.push(resolve);
+  });
+}
+
+function resumeUploadLoop() {
+  uploadState.paused = false;
+  pauseUploadBtn.textContent = 'Pause Upload';
+  statusEl.textContent = 'Uploading...';
+  var waiters = uploadState.resumeWaiters.splice(0);
+  waiters.forEach(function (resolve) { resolve(); });
+}
+
+pauseUploadBtn.addEventListener('click', function () {
+  if (!uploadState.running) return;
+  if (uploadState.paused) {
+    resumeUploadLoop();
+    return;
+  }
+  uploadState.paused = true;
+  pauseUploadBtn.textContent = 'Resume Upload';
+  statusEl.textContent = 'Upload paused. Click Resume Upload to continue.';
+  if (uploadState.currentXhr) uploadState.currentXhr.abort();
+});
+
+uploadBtn.addEventListener('click', async function () {
   if (!selectedFiles || !selectedFiles.length) return;
 
-  var formData = new FormData();
-  for (var i = 0; i < selectedFiles.length; i++) {
-    formData.append('videos', selectedFiles[i]);
-  }
-
+  uploadState.running = true;
+  uploadState.paused = false;
   uploadBtn.disabled = true;
-  setUploadProgress(0, Array.prototype.reduce.call(selectedFiles, function (sum, file) {
+  pauseUploadBtn.disabled = false;
+  pauseUploadBtn.textContent = 'Pause Upload';
+
+  var totalBytes = Array.prototype.reduce.call(selectedFiles, function (sum, file) {
     return sum + file.size;
-  }, 0));
+  }, 0);
+  var completedBeforeCurrentFile = 0;
+  var chunkSize = APP_CONFIG.chunkSizeBytes;
+  setUploadProgress(0, totalBytes);
   statusEl.textContent = 'Uploading...';
 
-  var xhr = new XMLHttpRequest();
-  xhr.open('POST', '/upload');
+  try {
+    for (var fileIndex = 0; fileIndex < selectedFiles.length; fileIndex++) {
+      var file = selectedFiles[fileIndex];
+      statusEl.textContent = 'Starting ' + file.name + '...';
+      var start = await requestJson('POST', '/upload/start', {
+        filename: file.name,
+        total_size: file.size
+      });
+      var offset = start.received || 0;
 
-  xhr.upload.onprogress = function (event) {
-    if (event.lengthComputable) {
-      setUploadProgress(event.loaded, event.total);
-    } else {
-      setUploadProgress(event.loaded, 0);
+      while (offset < file.size) {
+        await waitForResume();
+        var end = Math.min(offset + chunkSize, file.size);
+        statusEl.textContent = 'Uploading ' + file.name + '...';
+        var chunkResult = await sendChunk(start.upload_id, file, offset, end);
+        if (chunkResult.aborted) {
+          await waitForResume();
+          continue;
+        }
+        offset = chunkResult.received;
+        setUploadProgress(completedBeforeCurrentFile + offset, totalBytes);
+      }
+
+      statusEl.textContent = 'Extracting GPS from ' + file.name + '...';
+      var finished = await requestJson('POST', '/upload/finish', { upload_id: start.upload_id });
+      handleResult(finished.result);
+      completedBeforeCurrentFile += file.size;
+      setUploadProgress(completedBeforeCurrentFile, totalBytes);
     }
-  };
-
-  xhr.onload = function () {
-    try {
-      var data = parseUploadResponse(xhr);
-      progressBar.style.width = '100%';
-      progressText.textContent = '100% uploaded. Extracting GPS completed.';
-      statusEl.textContent = '';
-      (data.results || []).forEach(handleResult);
-    } catch (err) {
-      statusEl.textContent = 'Upload failed: ' + (err && err.message ? err.message : err)
-        + '. For 10 GB videos, also check any reverse proxy limit and server timeout in front of Flask.';
-    } finally {
-      uploadBtn.disabled = false;
-    }
-  };
-
-  xhr.onerror = function () {
-    statusEl.textContent = 'Upload failed: network connection lost or the server closed the request. For 10 GB videos, check proxy upload limits and timeouts.';
-    uploadBtn.disabled = false;
-  };
-
-  xhr.onabort = function () {
-    statusEl.textContent = 'Upload cancelled.';
-    uploadBtn.disabled = false;
-  };
-
-  xhr.send(formData);
+    progressBar.style.width = '100%';
+    progressText.textContent = '100% uploaded. GPS extraction completed.';
+    statusEl.textContent = '';
+  } catch (err) {
+    statusEl.textContent = 'Upload failed: ' + (err && err.message ? err.message : err)
+      + '. For large videos, also check any reverse proxy limit and server timeout in front of Flask.';
+  } finally {
+    uploadState.running = false;
+    uploadState.paused = false;
+    uploadState.currentXhr = null;
+    uploadState.resumeWaiters = [];
+    uploadBtn.disabled = !(selectedFiles && selectedFiles.length);
+    pauseUploadBtn.disabled = true;
+    pauseUploadBtn.textContent = 'Pause Upload';
+  }
 });
 
 function handleResult(result) {

@@ -9,6 +9,7 @@ hardcoded, unlike the original desktop app.
 """
 
 import os
+import json
 import socket
 import subprocess
 import tempfile
@@ -84,6 +85,7 @@ MAP_TILE_SUBDOMAINS = [s.strip() for s in required_env("MAP_TILE_SUBDOMAINS").sp
 MAP_TILE_MAX_ZOOM = required_env_int("MAP_TILE_MAX_ZOOM")
 SCREENSHOT_WIDTH = required_env_int("SCREENSHOT_WIDTH")
 SCREENSHOT_HEIGHT = required_env_int("SCREENSHOT_HEIGHT")
+CHUNK_SIZE_BYTES = required_env_int("CHUNK_SIZE_BYTES")
 
 if not FLASK_SECRET_KEY:
     raise RuntimeError(
@@ -128,7 +130,9 @@ def parse_size_to_bytes(value):
 
 MAX_UPLOAD_SIZE = required_env("MAX_UPLOAD_SIZE")
 MAX_CONTENT_LENGTH = parse_size_to_bytes(MAX_UPLOAD_SIZE)
+CHUNK_UPLOAD_FOLDER = os.path.join(UPLOAD_FOLDER, ".chunks")
 
+os.makedirs(CHUNK_UPLOAD_FOLDER, exist_ok=True)
 
 class LargeUploadRequest(FlaskRequest):
     """Store multipart file streams on the upload disk instead of OS temp."""
@@ -171,6 +175,50 @@ def discard_uploaded_temp(file_storage):
             os.remove(temp_path)
         except Exception:
             pass
+
+
+def chunk_meta_path(upload_id):
+    return os.path.join(CHUNK_UPLOAD_FOLDER, f"{secure_filename(upload_id)}.json")
+
+
+def chunk_part_path(upload_id):
+    return os.path.join(CHUNK_UPLOAD_FOLDER, f"{secure_filename(upload_id)}.part")
+
+
+def read_chunk_meta(upload_id):
+    meta_path = chunk_meta_path(upload_id)
+    if not os.path.exists(meta_path):
+        raise RuntimeError("Upload session was not found or has expired.")
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_chunk_meta(meta):
+    with open(chunk_meta_path(meta["upload_id"]), "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+
+
+def cleanup_chunk_upload(upload_id):
+    for path in (chunk_meta_path(upload_id), chunk_part_path(upload_id)):
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+
+
+def build_video_result(stored_name, original_filename):
+    log_action(f"Uploaded: {original_filename}")
+    try:
+        points = extract_gps_points(os.path.join(app.config["UPLOAD_FOLDER"], stored_name))
+        return {
+            "id": stored_name,
+            "filename": original_filename,
+            "points": points,
+            "point_count": len(points),
+        }
+    except RuntimeError as e:
+        return {"id": stored_name, "filename": original_filename, "error": str(e)}
 
 
 app = Flask(__name__)
@@ -332,6 +380,7 @@ def home():
         "mapTileMaxZoom": MAP_TILE_MAX_ZOOM,
         "screenshotWidth": SCREENSHOT_WIDTH,
         "screenshotHeight": SCREENSHOT_HEIGHT,
+        "chunkSizeBytes": CHUNK_SIZE_BYTES,
     }
     return render_template(
         "index.html",
@@ -367,20 +416,98 @@ def upload():
         stored_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
         save_path = os.path.join(app.config["UPLOAD_FOLDER"], stored_name)
         save_uploaded_file(f, save_path)
-        log_action(f"Uploaded: {f.filename}")
-
-        try:
-            points = extract_gps_points(save_path)
-            results.append({
-                "id": stored_name,
-                "filename": f.filename,
-                "points": points,
-                "point_count": len(points),
-            })
-        except RuntimeError as e:
-            results.append({"id": stored_name, "filename": f.filename, "error": str(e)})
+        results.append(build_video_result(stored_name, f.filename))
 
     return jsonify({"results": results})
+
+
+@app.route("/upload/start", methods=["POST"])
+@login_required
+def upload_start():
+    data = request.get_json(silent=True) or {}
+    filename = (data.get("filename") or "").strip()
+    total_size = int(data.get("total_size") or 0)
+
+    if not filename:
+        return jsonify({"error": "Filename is required"}), 400
+    if not is_allowed_file(filename):
+        return jsonify({"error": "Unsupported file type (only .mp4 / .mov allowed)"}), 400
+    if total_size <= 0:
+        return jsonify({"error": "File size is required"}), 400
+    if total_size > app.config["MAX_CONTENT_LENGTH"]:
+        return jsonify({"error": f"File too large. Max upload size is {MAX_UPLOAD_SIZE} per request."}), 413
+
+    upload_id = uuid.uuid4().hex
+    safe_name = secure_filename(filename) or "video"
+    stored_name = f"{uuid.uuid4().hex[:8]}_{safe_name}"
+    meta = {
+        "upload_id": upload_id,
+        "filename": filename,
+        "stored_name": stored_name,
+        "total_size": total_size,
+        "received": 0,
+    }
+    write_chunk_meta(meta)
+    open(chunk_part_path(upload_id), "ab").close()
+    return jsonify({"upload_id": upload_id, "received": 0})
+
+
+@app.route("/upload/chunk", methods=["POST"])
+@login_required
+def upload_chunk():
+    upload_id = request.headers.get("X-Upload-Id", "")
+    try:
+        offset = int(request.headers.get("X-Chunk-Offset", "0"))
+        meta = read_chunk_meta(upload_id)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    part_path = chunk_part_path(upload_id)
+    current_size = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+    if offset != current_size:
+        return jsonify({
+            "error": "Chunk offset mismatch",
+            "expected_offset": current_size,
+        }), 409
+
+    chunk = request.get_data(cache=False)
+    if not chunk:
+        return jsonify({"error": "Empty chunk received"}), 400
+    if current_size + len(chunk) > int(meta["total_size"]):
+        return jsonify({"error": "Chunk exceeds expected file size"}), 400
+
+    with open(part_path, "ab") as f:
+        f.write(chunk)
+
+    meta["received"] = current_size + len(chunk)
+    write_chunk_meta(meta)
+    return jsonify({"received": meta["received"], "total_size": meta["total_size"]})
+
+
+@app.route("/upload/finish", methods=["POST"])
+@login_required
+def upload_finish():
+    data = request.get_json(silent=True) or {}
+    upload_id = data.get("upload_id") or ""
+    try:
+        meta = read_chunk_meta(upload_id)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+    part_path = chunk_part_path(upload_id)
+    received = os.path.getsize(part_path) if os.path.exists(part_path) else 0
+    if received != int(meta["total_size"]):
+        return jsonify({
+            "error": "Upload is not complete yet",
+            "received": received,
+            "total_size": meta["total_size"],
+        }), 400
+
+    final_path = os.path.join(app.config["UPLOAD_FOLDER"], meta["stored_name"])
+    os.replace(part_path, final_path)
+    result = build_video_result(meta["stored_name"], meta["filename"])
+    cleanup_chunk_upload(upload_id)
+    return jsonify({"result": result})
 
 
 @app.route("/video/<path:stored_name>")
