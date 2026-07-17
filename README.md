@@ -14,7 +14,7 @@ login.
 - Play/Pause, Back 3s, Prev/Next Frame, playback speed, and scroll-to-zoom
 - Configurable HD screenshot export
 - Coordinate search with nearby-video highlighting
-- Login gate with optional email notifications
+- Login gate with optional email notifications 
 - Large-upload support with browser upload progress
 
 ## Security
