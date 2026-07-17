@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8"/>
 <title>MAPHRONIX Web</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<link rel="stylesheet" href="{{ frontend_config.leafletCssUrl }}"/>
+<script src="{{ frontend_config.leafletJsUrl }}"></script>
 <style>
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; padding: 0; font-family: 'Segoe UI', Arial, sans-serif; background: #0f172a; color: #e5e7eb; }
@@ -131,7 +131,9 @@
         <option value="5">5x</option>
         <option value="10">10x</option>
       </select>
-      <button id="screenshot-btn" disabled>&#128247; Screenshot HD (5312&times;2988)</button>
+      <button id="screenshot-btn" disabled>
+        &#128247; Screenshot HD ({{ frontend_config.screenshotWidth }}&times;{{ frontend_config.screenshotHeight }})
+      </button>
     </div>
   </div>
 
@@ -139,6 +141,7 @@
 </div>
 
 <script>
+var APP_CONFIG = {{ frontend_config | tojson }};
 // ════════════════════════════════════════════
 //  LEAFLET MAP  (ported from the desktop app's map_html())
 // ════════════════════════════════════════════
@@ -148,9 +151,9 @@ var leafletMap = L.map('map', { zoomControl: true, attributionControl: false }).
 // desktop app. For a production deployment, prefer an official tile provider
 // (Google Maps Platform with an API key + billing, Mapbox, or Esri) so you
 // stay within that provider's terms of service.
-L.tileLayer('https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
-  subdomains: ['0','1','2','3'],
-  maxZoom: 21
+L.tileLayer(APP_CONFIG.mapTileUrl, {
+  subdomains: APP_CONFIG.mapTileSubdomains,
+  maxZoom: APP_CONFIG.mapTileMaxZoom
 }).addTo(leafletMap);
 
 function makeGooglePin(color) {
@@ -513,11 +516,12 @@ function onVideoWheelZoom(e) {
 //  PHASE 3a: HD SCREENSHOT (ported from take_hd_screenshot)
 // ════════════════════════════════════════════
 // Note: the desktop app captured the GoPro's native decoded frame and scaled
-// it to exactly 5312x2988. The browser gives us the same decoded frame via
-// video.videoWidth/videoHeight, so we draw that onto a 5312x2988 canvas.
+// it to the configured screenshot size. The browser gives us the same decoded
+// frame via video.videoWidth/videoHeight, so we draw that onto a canvas.
 // The actual sharpness ceiling is still whatever resolution the video itself
 // was recorded at -- scaling up doesn't add detail that wasn't there.
-var TARGET_W = 5312, TARGET_H = 2988;
+var TARGET_W = APP_CONFIG.screenshotWidth;
+var TARGET_H = APP_CONFIG.screenshotHeight;
 
 screenshotBtn.addEventListener('click', function () {
   if (!currentVideoEl || !currentVideoEl.videoWidth) {

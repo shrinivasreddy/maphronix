@@ -27,9 +27,8 @@ from werkzeug.utils import secure_filename
 
 try:
     from zoneinfo import ZoneInfo
-    IST = ZoneInfo("Asia/Kolkata")
 except Exception:
-    IST = None
+    ZoneInfo = None
 
 try:
     import requests
@@ -43,14 +42,48 @@ except ImportError:
 from dotenv import load_dotenv
 load_dotenv()
 
-EXIFTOOL_PATH       = os.environ.get("EXIFTOOL_PATH", "exiftool")
-EXIFTOOL_TIMEOUT_SECONDS = int(os.environ.get("EXIFTOOL_TIMEOUT_SECONDS", "1800"))
-FLASK_SECRET_KEY    = os.environ.get("FLASK_SECRET_KEY")
-APP_LOGIN_PASSWORD  = os.environ.get("APP_LOGIN_PASSWORD")
-EMAIL_SENDER        = os.environ.get("EMAIL_SENDER")
-EMAIL_PASSWORD      = os.environ.get("EMAIL_PASSWORD")
-EMAIL_RECEIVER      = os.environ.get("EMAIL_RECEIVER")
+def env(name, default=None):
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return default
+    return value
+
+
+def required_env(name):
+    value = env(name)
+    if value is None:
+        raise RuntimeError(f"{name} is not set. Add it to your .env file.")
+    return value
+
+
+def required_env_int(name):
+    return int(required_env(name))
+
+
+APP_TIMEZONE = required_env("APP_TIMEZONE")
+APP_TZ = ZoneInfo(APP_TIMEZONE) if ZoneInfo else None
+EXIFTOOL_PATH = required_env("EXIFTOOL_PATH")
+EXIFTOOL_TIMEOUT_SECONDS = required_env_int("EXIFTOOL_TIMEOUT_SECONDS")
+FLASK_SECRET_KEY = env("FLASK_SECRET_KEY")
+APP_LOGIN_PASSWORD = env("APP_LOGIN_PASSWORD")
+APP_HOST = required_env("APP_HOST")
+APP_PORT = required_env_int("APP_PORT")
+APP_DEBUG = required_env("APP_DEBUG").lower() in {"1", "true", "yes", "on"}
+EMAIL_SENDER = env("EMAIL_SENDER")
+EMAIL_PASSWORD = env("EMAIL_PASSWORD")
+EMAIL_RECEIVER = env("EMAIL_RECEIVER")
+SMTP_HOST = required_env("SMTP_HOST")
+SMTP_PORT = required_env_int("SMTP_PORT")
+IP_LOOKUP_URL = required_env("IP_LOOKUP_URL")
+IP_LOOKUP_TIMEOUT_SECONDS = required_env_int("IP_LOOKUP_TIMEOUT_SECONDS")
 EMAIL_NOTIFICATIONS_ENABLED = bool(EMAIL_SENDER and EMAIL_PASSWORD and EMAIL_RECEIVER)
+LEAFLET_CSS_URL = required_env("LEAFLET_CSS_URL")
+LEAFLET_JS_URL = required_env("LEAFLET_JS_URL")
+MAP_TILE_URL = required_env("MAP_TILE_URL")
+MAP_TILE_SUBDOMAINS = [s.strip() for s in required_env("MAP_TILE_SUBDOMAINS").split(",") if s.strip()]
+MAP_TILE_MAX_ZOOM = required_env_int("MAP_TILE_MAX_ZOOM")
+SCREENSHOT_WIDTH = required_env_int("SCREENSHOT_WIDTH")
+SCREENSHOT_HEIGHT = required_env_int("SCREENSHOT_HEIGHT")
 
 if not FLASK_SECRET_KEY:
     raise RuntimeError(
@@ -62,17 +95,21 @@ if not APP_LOGIN_PASSWORD:
     raise RuntimeError("APP_LOGIN_PASSWORD is not set. Add it to your .env file.")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-ALLOWED_EXTENSIONS = {".mp4", ".mov"}
-LOG_FILE_PATH = os.path.join(tempfile.gettempdir(), "maphronix_activity_log.txt")
+UPLOAD_FOLDER = os.path.abspath(required_env("UPLOAD_FOLDER"))
+ALLOWED_EXTENSIONS = {
+    ext.strip() if ext.strip().startswith(".") else f".{ext.strip()}"
+    for ext in required_env("ALLOWED_EXTENSIONS").lower().split(",")
+    if ext.strip()
+}
+LOG_FILE_PATH = os.path.abspath(required_env("LOG_FILE_PATH"))
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 
-def parse_size_to_bytes(value, default):
-    """Parse values like 20GB, 512MB, or raw bytes from environment config."""
+def parse_size_to_bytes(value):
+    """Parse size values with suffixes such as GB, MB, KB, or raw bytes."""
     if not value:
-        return default
+        raise ValueError("Size value is required")
     text = str(value).strip().upper().replace(" ", "")
     units = (
         ("GB", 1024 ** 3),
@@ -89,8 +126,8 @@ def parse_size_to_bytes(value, default):
     return int(float(text))
 
 
-MAX_UPLOAD_SIZE = os.environ.get("MAX_UPLOAD_SIZE", "20GB")
-MAX_CONTENT_LENGTH = parse_size_to_bytes(MAX_UPLOAD_SIZE, 20 * 1024 * 1024 * 1024)
+MAX_UPLOAD_SIZE = required_env("MAX_UPLOAD_SIZE")
+MAX_CONTENT_LENGTH = parse_size_to_bytes(MAX_UPLOAD_SIZE)
 
 
 class LargeUploadRequest(FlaskRequest):
@@ -148,7 +185,7 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
 # send_login_email / send_activity_log_email)
 # ---------------------------------------------------------------------------
 def log_action(text):
-    ts = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S") if IST else datetime.now().isoformat()
+    ts = datetime.now(APP_TZ).strftime("%d-%b-%Y %H:%M:%S") if APP_TZ else datetime.now().isoformat()
     try:
         with open(LOG_FILE_PATH, "a", encoding="utf-8") as f:
             f.write(f"[{ts}] {text}\n")
@@ -169,7 +206,7 @@ def _send_email(subject, body, attachment_path=None):
             with open(attachment_path, "rb") as f:
                 msg.add_attachment(f.read(), maintype="text", subtype="plain",
                                     filename=os.path.basename(attachment_path))
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as s:
             s.login(EMAIL_SENDER, EMAIL_PASSWORD)
             s.send_message(msg)
     except Exception:
@@ -182,13 +219,13 @@ def send_login_email_async(username):
         ip_data = {}
         if requests:
             try:
-                ip_data = requests.get("http://ip-api.com/json", timeout=5).json()
+                ip_data = requests.get(IP_LOOKUP_URL, timeout=IP_LOOKUP_TIMEOUT_SECONDS).json()
             except Exception:
                 pass
         if os.path.exists(LOG_FILE_PATH):
             os.remove(LOG_FILE_PATH)
         log_action(f"User logged in: {username}")
-        login_time = datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S") if IST else datetime.now().isoformat()
+        login_time = datetime.now(APP_TZ).strftime("%d-%b-%Y %H:%M:%S") if APP_TZ else datetime.now().isoformat()
         body = (
             f"User : {username}\nLogin Time : {login_time}\n\n"
             f"System : {hostname}\n"
@@ -287,7 +324,20 @@ def extract_gps_points(video_path):
 @app.route("/")
 @login_required
 def home():
-    return render_template("index.html", username=session.get("user"))
+    frontend_config = {
+        "leafletCssUrl": LEAFLET_CSS_URL,
+        "leafletJsUrl": LEAFLET_JS_URL,
+        "mapTileUrl": MAP_TILE_URL,
+        "mapTileSubdomains": MAP_TILE_SUBDOMAINS,
+        "mapTileMaxZoom": MAP_TILE_MAX_ZOOM,
+        "screenshotWidth": SCREENSHOT_WIDTH,
+        "screenshotHeight": SCREENSHOT_HEIGHT,
+    }
+    return render_template(
+        "index.html",
+        username=session.get("user"),
+        frontend_config=frontend_config,
+    )
 
 
 @app.route("/upload", methods=["POST"])
@@ -348,5 +398,4 @@ def too_large(_e):
 
 
 if __name__ == "__main__":
-    # debug=True auto-reloads on code changes -- turn off before deploying
-    app.run(debug=True)
+    app.run(host=APP_HOST, port=APP_PORT, debug=APP_DEBUG)
