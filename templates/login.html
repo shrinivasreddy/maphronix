@@ -9,7 +9,7 @@
   #box { background: #0f172a; border: 3px solid #4ade80; border-radius: 15px; padding: 32px; width: 340px; }
   h1 { color: #4ade80; font-size: 20px; text-align: center; margin: 0 0 24px; }
   label { color: #4ade80; font-size: 13px; font-weight: bold; display: block; margin-bottom: 6px; }
-  input { width: 100%; background: #1e293b; border: 2px solid #334155; border-radius: 8px; color: #fff;
+  input:not([type="hidden"]) { width: 100%; background: #1e293b; border: 2px solid #334155; border-radius: 8px; color: #fff;
     padding: 10px; font-size: 14px; margin-bottom: 16px; box-sizing: border-box; }
   button { width: 100%; background: #4ade80; color: #0f172a; border: none; border-radius: 8px;
     font-size: 16px; font-weight: bold; padding: 12px; cursor: pointer; }
@@ -21,6 +21,7 @@
   <div id="box">
     <h1>WELCOME TO MAPHRONIX</h1>
     <form method="POST">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <label>User Name</label>
       <input type="text" name="username" placeholder="Enter Name..." required autofocus>
       <label>Password</label>

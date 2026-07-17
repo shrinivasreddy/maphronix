@@ -92,6 +92,7 @@
     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 16px;">
       <h1 style="margin:0;">MAPHRONIX Web</h1>
       <form method="POST" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ frontend_config.csrfToken }}">
         <button type="submit" style="background:#2d0a0a; border:1px solid #ef4444; color:#ef4444; border-radius:6px; padding:5px 10px; font-size:11px; cursor:pointer;">
           Logout
         </button>
@@ -394,7 +395,10 @@ function parseUploadResponse(xhr) {
     }
   }
   if (xhr.status < 200 || xhr.status >= 300) {
-    throw new Error(data.error || ('Server returned HTTP ' + xhr.status));
+    var error = new Error(data.error || ('Server returned HTTP ' + xhr.status));
+    error.status = xhr.status;
+    error.data = data;
+    throw error;
   }
   return data;
 }
@@ -404,6 +408,7 @@ function requestJson(method, url, payload) {
     var xhr = new XMLHttpRequest();
     xhr.open(method, url);
     xhr.setRequestHeader('Content-Type', 'application/json');
+    xhr.setRequestHeader('X-CSRF-Token', APP_CONFIG.csrfToken);
     xhr.onload = function () {
       try {
         resolve(parseUploadResponse(xhr));
@@ -423,6 +428,7 @@ function sendChunk(uploadId, file, offset, end) {
     xhr.open('POST', '/upload/chunk');
     xhr.setRequestHeader('X-Upload-Id', uploadId);
     xhr.setRequestHeader('X-Chunk-Offset', String(offset));
+    xhr.setRequestHeader('X-CSRF-Token', APP_CONFIG.csrfToken);
     xhr.onload = function () {
       uploadState.currentXhr = null;
       try {
@@ -501,7 +507,17 @@ uploadBtn.addEventListener('click', async function () {
         await waitForResume();
         var end = Math.min(offset + chunkSize, file.size);
         statusEl.textContent = 'Uploading ' + file.name + '...';
-        var chunkResult = await sendChunk(start.upload_id, file, offset, end);
+        var chunkResult;
+        try {
+          chunkResult = await sendChunk(start.upload_id, file, offset, end);
+        } catch (err) {
+          if (err.status === 409 && err.data && Number.isFinite(err.data.expected_offset)) {
+            offset = err.data.expected_offset;
+            setUploadProgress(completedBeforeCurrentFile + offset, totalBytes);
+            continue;
+          }
+          throw err;
+        }
         if (chunkResult.aborted) {
           await waitForResume();
           continue;

@@ -10,6 +10,8 @@ hardcoded, unlike the original desktop app.
 
 import os
 import json
+import hmac
+import secrets
 import socket
 import subprocess
 import tempfile
@@ -22,7 +24,7 @@ import smtplib
 
 from flask import (
     Flask, render_template, request, jsonify, send_from_directory,
-    session, redirect, url_for, Request as FlaskRequest,
+    session, redirect, url_for, Request as FlaskRequest, g, abort,
 )
 from werkzeug.utils import secure_filename
 
@@ -70,6 +72,9 @@ APP_LOGIN_PASSWORD = env("APP_LOGIN_PASSWORD")
 APP_HOST = required_env("APP_HOST")
 APP_PORT = required_env_int("APP_PORT")
 APP_DEBUG = required_env("APP_DEBUG").lower() in {"1", "true", "yes", "on"}
+SESSION_COOKIE_SECURE = required_env("SESSION_COOKIE_SECURE").lower() in {"1", "true", "yes", "on"}
+SESSION_COOKIE_SAMESITE = required_env("SESSION_COOKIE_SAMESITE")
+MAX_CONTENT_LENGTH_BUFFER_BYTES = required_env_int("MAX_CONTENT_LENGTH_BUFFER_BYTES")
 EMAIL_SENDER = env("EMAIL_SENDER")
 EMAIL_PASSWORD = env("EMAIL_PASSWORD")
 EMAIL_RECEIVER = env("EMAIL_RECEIVER")
@@ -97,13 +102,21 @@ if not APP_LOGIN_PASSWORD:
     raise RuntimeError("APP_LOGIN_PASSWORD is not set. Add it to your .env file.")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOLDER = os.path.abspath(required_env("UPLOAD_FOLDER"))
+
+
+def app_path(path_value):
+    if os.path.isabs(path_value):
+        return path_value
+    return os.path.abspath(os.path.join(BASE_DIR, path_value))
+
+
+UPLOAD_FOLDER = app_path(required_env("UPLOAD_FOLDER"))
 ALLOWED_EXTENSIONS = {
     ext.strip() if ext.strip().startswith(".") else f".{ext.strip()}"
     for ext in required_env("ALLOWED_EXTENSIONS").lower().split(",")
     if ext.strip()
 }
-LOG_FILE_PATH = os.path.abspath(required_env("LOG_FILE_PATH"))
+LOG_FILE_PATH = app_path(required_env("LOG_FILE_PATH"))
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
@@ -131,6 +144,7 @@ def parse_size_to_bytes(value):
 MAX_UPLOAD_SIZE = required_env("MAX_UPLOAD_SIZE")
 MAX_CONTENT_LENGTH = parse_size_to_bytes(MAX_UPLOAD_SIZE)
 CHUNK_UPLOAD_FOLDER = os.path.join(UPLOAD_FOLDER, ".chunks")
+REQUEST_MAX_CONTENT_LENGTH = MAX_CONTENT_LENGTH + MAX_CONTENT_LENGTH_BUFFER_BYTES
 
 os.makedirs(CHUNK_UPLOAD_FOLDER, exist_ok=True)
 
@@ -177,11 +191,23 @@ def discard_uploaded_temp(file_storage):
             pass
 
 
+def is_valid_upload_id(upload_id):
+    try:
+        uuid.UUID(upload_id, version=4)
+        return True
+    except Exception:
+        return False
+
+
 def chunk_meta_path(upload_id):
+    if not is_valid_upload_id(upload_id):
+        raise RuntimeError("Invalid upload session id.")
     return os.path.join(CHUNK_UPLOAD_FOLDER, f"{secure_filename(upload_id)}.json")
 
 
 def chunk_part_path(upload_id):
+    if not is_valid_upload_id(upload_id):
+        raise RuntimeError("Invalid upload session id.")
     return os.path.join(CHUNK_UPLOAD_FOLDER, f"{secure_filename(upload_id)}.part")
 
 
@@ -225,7 +251,34 @@ app = Flask(__name__)
 app.request_class = LargeUploadRequest
 app.secret_key = FLASK_SECRET_KEY
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_LENGTH
+app.config["MAX_CONTENT_LENGTH"] = REQUEST_MAX_CONTENT_LENGTH
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = SESSION_COOKIE_SAMESITE
+app.config["SESSION_COOKIE_SECURE"] = SESSION_COOKIE_SECURE
+
+
+@app.before_request
+def prepare_request():
+    g.request_started_at = datetime.now()
+    session.setdefault("csrf_token", secrets.token_urlsafe(32))
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        token = request.headers.get("X-CSRF-Token")
+        if not token and request.content_type and request.content_type.startswith("application/x-www-form-urlencoded"):
+            token = request.form.get("csrf_token")
+        if not token and request.content_type and request.content_type.startswith("multipart/form-data"):
+            token = request.form.get("csrf_token")
+        if not hmac.compare_digest(token or "", session.get("csrf_token", "")):
+            if request.path.startswith(("/upload", "/video")):
+                return jsonify({"error": "Invalid CSRF token"}), 400
+            abort(400)
+
+
+@app.after_request
+def add_security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -317,13 +370,13 @@ def login():
     if request.method == "POST":
         username = (request.form.get("username") or "").strip()
         password = request.form.get("password") or ""
-        if username and password == APP_LOGIN_PASSWORD:
+        if username and hmac.compare_digest(password, APP_LOGIN_PASSWORD):
             session["user"] = username
             send_login_email_async(username)
             log_action(f"Btn: Login ({username})")
             return redirect(url_for("home"))
-        return render_template("login.html", error="Invalid credentials")
-    return render_template("login.html", error=None)
+        return render_template("login.html", error="Invalid credentials", csrf_token=session["csrf_token"])
+    return render_template("login.html", error=None, csrf_token=session["csrf_token"])
 
 
 @app.route("/logout", methods=["POST"])
@@ -381,6 +434,7 @@ def home():
         "screenshotWidth": SCREENSHOT_WIDTH,
         "screenshotHeight": SCREENSHOT_HEIGHT,
         "chunkSizeBytes": CHUNK_SIZE_BYTES,
+        "csrfToken": session["csrf_token"],
     }
     return render_template(
         "index.html",
@@ -434,7 +488,7 @@ def upload_start():
         return jsonify({"error": "Unsupported file type (only .mp4 / .mov allowed)"}), 400
     if total_size <= 0:
         return jsonify({"error": "File size is required"}), 400
-    if total_size > app.config["MAX_CONTENT_LENGTH"]:
+    if total_size > MAX_CONTENT_LENGTH:
         return jsonify({"error": f"File too large. Max upload size is {MAX_UPLOAD_SIZE} per request."}), 413
 
     upload_id = uuid.uuid4().hex
