@@ -11,6 +11,8 @@ hardcoded, unlike the original desktop app.
 import os
 import json
 import hmac
+import errno
+import shutil
 import secrets
 import socket
 import subprocess
@@ -26,6 +28,7 @@ from flask import (
     Flask, render_template, request, jsonify, send_from_directory,
     session, redirect, url_for, Request as FlaskRequest, g, abort,
 )
+from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 try:
@@ -91,6 +94,7 @@ MAP_TILE_MAX_ZOOM = required_env_int("MAP_TILE_MAX_ZOOM")
 SCREENSHOT_WIDTH = required_env_int("SCREENSHOT_WIDTH")
 SCREENSHOT_HEIGHT = required_env_int("SCREENSHOT_HEIGHT")
 CHUNK_SIZE_BYTES = required_env_int("CHUNK_SIZE_BYTES")
+CHUNK_UPLOAD_TTL_HOURS = required_env_int("CHUNK_UPLOAD_TTL_HOURS")
 
 if not FLASK_SECRET_KEY:
     raise RuntimeError(
@@ -231,6 +235,28 @@ def cleanup_chunk_upload(upload_id):
                 os.remove(path)
             except Exception:
                 pass
+
+
+def cleanup_old_chunk_uploads():
+    cutoff = datetime.now().timestamp() - (CHUNK_UPLOAD_TTL_HOURS * 60 * 60)
+    for name in os.listdir(CHUNK_UPLOAD_FOLDER):
+        path = os.path.join(CHUNK_UPLOAD_FOLDER, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except Exception:
+            pass
+
+
+def upload_storage_error_message(error):
+    if error.errno == errno.ENOSPC:
+        return "Server upload disk is full. Free disk space or move UPLOAD_FOLDER to a larger drive."
+    if error.errno == errno.EFBIG:
+        return (
+            "Server upload folder cannot store a file this large. Use an NTFS/exFAT disk "
+            "and set UPLOAD_FOLDER to that location."
+        )
+    return f"Server could not write upload data: {error}"
 
 
 def build_video_result(stored_name, original_filename):
@@ -408,7 +434,10 @@ def extract_gps_points(video_path):
             if "," not in line:
                 continue
             lat_str, lon_str = line.split(",")[:2]
-            pts.append({"lat": float(lat_str), "lon": float(lon_str)})
+            try:
+                pts.append({"lat": float(lat_str), "lon": float(lon_str)})
+            except ValueError:
+                continue
         return pts
     except FileNotFoundError:
         raise RuntimeError(
@@ -478,9 +507,13 @@ def upload():
 @app.route("/upload/start", methods=["POST"])
 @login_required
 def upload_start():
+    cleanup_old_chunk_uploads()
     data = request.get_json(silent=True) or {}
     filename = (data.get("filename") or "").strip()
-    total_size = int(data.get("total_size") or 0)
+    try:
+        total_size = int(data.get("total_size") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "File size must be a number"}), 400
 
     if not filename:
         return jsonify({"error": "Filename is required"}), 400
@@ -490,6 +523,17 @@ def upload_start():
         return jsonify({"error": "File size is required"}), 400
     if total_size > MAX_CONTENT_LENGTH:
         return jsonify({"error": f"File too large. Max upload size is {MAX_UPLOAD_SIZE} per request."}), 413
+    try:
+        free_bytes = shutil.disk_usage(UPLOAD_FOLDER).free
+    except OSError:
+        free_bytes = None
+    if free_bytes is not None and free_bytes < total_size + MAX_CONTENT_LENGTH_BUFFER_BYTES:
+        return jsonify({
+            "error": (
+                "Not enough free space on the server upload drive. "
+                f"Available: {free_bytes} bytes, required: {total_size + MAX_CONTENT_LENGTH_BUFFER_BYTES} bytes."
+            )
+        }), 507
 
     upload_id = uuid.uuid4().hex
     safe_name = secure_filename(filename) or "video"
@@ -501,8 +545,12 @@ def upload_start():
         "total_size": total_size,
         "received": 0,
     }
-    write_chunk_meta(meta)
-    open(chunk_part_path(upload_id), "ab").close()
+    try:
+        write_chunk_meta(meta)
+        open(chunk_part_path(upload_id), "ab").close()
+    except OSError as e:
+        cleanup_chunk_upload(upload_id)
+        return jsonify({"error": upload_storage_error_message(e)}), 507
     return jsonify({"upload_id": upload_id, "received": 0})
 
 
@@ -524,17 +572,22 @@ def upload_chunk():
             "expected_offset": current_size,
         }), 409
 
-    chunk = request.get_data(cache=False)
+    try:
+        chunk = request.get_data(cache=False)
+    except Exception as e:
+        return jsonify({"error": f"Could not read upload chunk: {e}"}), 400
     if not chunk:
         return jsonify({"error": "Empty chunk received"}), 400
     if current_size + len(chunk) > int(meta["total_size"]):
         return jsonify({"error": "Chunk exceeds expected file size"}), 400
 
-    with open(part_path, "ab") as f:
-        f.write(chunk)
-
-    meta["received"] = current_size + len(chunk)
-    write_chunk_meta(meta)
+    try:
+        with open(part_path, "ab") as f:
+            f.write(chunk)
+        meta["received"] = current_size + len(chunk)
+        write_chunk_meta(meta)
+    except OSError as e:
+        return jsonify({"error": upload_storage_error_message(e)}), 507
     return jsonify({"received": meta["received"], "total_size": meta["total_size"]})
 
 
@@ -558,7 +611,10 @@ def upload_finish():
         }), 400
 
     final_path = os.path.join(app.config["UPLOAD_FOLDER"], meta["stored_name"])
-    os.replace(part_path, final_path)
+    try:
+        os.replace(part_path, final_path)
+    except OSError as e:
+        return jsonify({"error": upload_storage_error_message(e)}), 507
     result = build_video_result(meta["stored_name"], meta["filename"])
     cleanup_chunk_upload(upload_id)
     return jsonify({"result": result})
@@ -571,11 +627,45 @@ def video(stored_name):
     return send_from_directory(app.config["UPLOAD_FOLDER"], secure_filename(stored_name))
 
 
+@app.route("/video/<path:stored_name>", methods=["DELETE"])
+@login_required
+def delete_video(stored_name):
+    safe_name = secure_filename(stored_name)
+    if not safe_name:
+        return jsonify({"error": "Invalid video name"}), 400
+
+    video_path = os.path.abspath(os.path.join(app.config["UPLOAD_FOLDER"], safe_name))
+    upload_dir = os.path.abspath(app.config["UPLOAD_FOLDER"])
+    if os.path.dirname(video_path) != upload_dir:
+        return jsonify({"error": "Invalid video path"}), 400
+    if not os.path.exists(video_path):
+        return jsonify({"error": "Video not found"}), 404
+
+    try:
+        os.remove(video_path)
+        log_action(f"Deleted: {safe_name}")
+        return jsonify({"deleted": safe_name})
+    except OSError as e:
+        return jsonify({"error": f"Could not delete video: {e}"}), 500
+
+
 @app.errorhandler(413)
 def too_large(_e):
     return jsonify({
         "error": f"File too large. Max upload size is {MAX_UPLOAD_SIZE} per request."
     }), 413
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(error):
+    if isinstance(error, HTTPException):
+        if request.path.startswith(("/upload", "/video")):
+            return jsonify({"error": error.description}), error.code
+        return error
+    app.logger.exception("Unhandled request error")
+    if request.path.startswith(("/upload", "/video")):
+        return jsonify({"error": "Unexpected server error. Check the server log for details."}), 500
+    return "Internal Server Error", 500
 
 
 if __name__ == "__main__":
