@@ -95,6 +95,9 @@ Set `SESSION_COOKIE_SECURE=true` when serving over HTTPS.
   layer must also allow the same body size and a long enough request timeout.
 - Upload pause/resume happens between chunks. If you pause while a chunk is
   in flight, the browser cancels that chunk and retries it when you resume.
+- If uploads fail around 4 GB, move `UPLOAD_FOLDER` to a disk/filesystem that
+  supports large files, such as NTFS or exFAT, and make sure it has enough
+  free space.
 
 ## Notes
 

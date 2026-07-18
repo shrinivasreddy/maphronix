@@ -400,7 +400,12 @@ function parseUploadResponse(xhr) {
     try {
       data = JSON.parse(text);
     } catch (e) {
-      data = { error: text.slice(0, 300) };
+      var looksLikeHtml = /^\s*<!doctype html/i.test(text) || /^\s*<html/i.test(text);
+      data = {
+        error: looksLikeHtml
+          ? 'Server returned an HTML error page instead of JSON. Check the Flask/server log for the real traceback.'
+          : text.slice(0, 300)
+      };
     }
   }
   if (xhr.status < 200 || xhr.status >= 300) {
