@@ -52,7 +52,14 @@
   #video-list li {
     padding: 8px 10px; border: 1px solid #334155; border-radius: 6px;
     margin-bottom: 6px; cursor: pointer; font-size: 13px; word-break: break-all;
+    display: flex; align-items: center; gap: 8px;
   }
+  #video-list .video-name { flex: 1; min-width: 0; }
+  #video-list .delete-video-btn {
+    flex: 0 0 auto; background: #2d0a0a; border: 1px solid #ef4444; color: #ef4444;
+    border-radius: 5px; padding: 4px 7px; font-size: 11px; font-weight: bold; cursor: pointer;
+  }
+  #video-list .delete-video-btn:hover { background: #451313; }
   #video-list li:hover { background: #1e293b; }
   #video-list li.nearby { background: #f59e0b; border-color: #f59e0b; color: #000; }
   #video-list li.active { background: #1d4ed8 !important; border-color: #1d4ed8 !important; color: #fff !important; }
@@ -286,11 +293,12 @@ function clearSearchPin() {
   if (searchPin) { leafletMap.removeLayer(searchPin); searchPin = null; }
 }
 
-function clearMap() { blueLayer.clearLayers(); activeLayer.clearLayers(); clearSearchPin(); }
+function clearMap() { blueLayer.clearLayers(); activeLayer.clearLayers(); clearSearchPin(); videoPathLayers = {}; }
 
-function addPath(pts) {
+function addPath(id, pts) {
   if (!pts.length) return;
-  L.polyline(pts.map(function(p){ return [p.lat, p.lon]; }),
+  if (videoPathLayers[id]) blueLayer.removeLayer(videoPathLayers[id]);
+  videoPathLayers[id] = L.polyline(pts.map(function(p){ return [p.lat, p.lon]; }),
     { color: '#15803d', weight: 2, opacity: 0.6 }).addTo(blueLayer);
   leafletMap.fitBounds(blueLayer.getBounds());
 }
@@ -317,6 +325,7 @@ var statusEl   = document.getElementById('status');
 var videoList  = document.getElementById('video-list');
 
 var videoGpsCache = {};   // video id -> [{lat, lon}, ...]
+var videoPathLayers = {}; // video id -> Leaflet layer
 var selectedFiles = null;
 var activeVideoId = null;
 var uploadState = {
@@ -551,17 +560,30 @@ uploadBtn.addEventListener('click', async function () {
 
 function handleResult(result) {
   var li = document.createElement('li');
-  li.textContent = result.filename;
+  var nameSpan = document.createElement('span');
+  nameSpan.className = 'video-name';
+  nameSpan.textContent = result.filename;
+  li.appendChild(nameSpan);
 
   if (result.error) {
-    li.textContent += '  —  ' + result.error;
+    nameSpan.textContent += '  —  ' + result.error;
     li.classList.add('error');
     videoList.appendChild(li);
     return;
   }
 
   videoGpsCache[result.id] = result.points;
-  li.textContent += '  (' + result.point_count + ' GPS points)';
+  nameSpan.textContent += '  (' + result.point_count + ' GPS points)';
+
+  var deleteBtn = document.createElement('button');
+  deleteBtn.type = 'button';
+  deleteBtn.className = 'delete-video-btn';
+  deleteBtn.textContent = 'Delete';
+  deleteBtn.addEventListener('click', function (event) {
+    event.stopPropagation();
+    deleteVideo(result.id, result.filename, li);
+  });
+  li.appendChild(deleteBtn);
 
   li.addEventListener('click', function () {
     document.querySelectorAll('#video-list li').forEach(function (el) { el.classList.remove('active'); });
@@ -575,7 +597,37 @@ function handleResult(result) {
   videoLiById[result.id] = li;
 
   if (result.points && result.points.length) {
-    addPath(result.points);
+    addPath(result.id, result.points);
+  }
+}
+
+async function deleteVideo(id, filename, li) {
+  if (!confirm('Delete "' + filename + '" from the server?')) return;
+  try {
+    await requestJson('DELETE', '/video/' + encodeURIComponent(id), {});
+    if (videoPathLayers[id]) {
+      blueLayer.removeLayer(videoPathLayers[id]);
+      delete videoPathLayers[id];
+    }
+    delete videoGpsCache[id];
+    delete videoLiById[id];
+    li.remove();
+
+    if (activeVideoId === id) {
+      activeVideoId = null;
+      activeLayer.clearLayers();
+      if (currentVideoEl) {
+        currentVideoEl.pause();
+      }
+      videoWrap.innerHTML = '<span id="placeholder-text">Select a video from the list to play it</span>';
+      currentVideoEl = null;
+      currentPts = [];
+      telemetryEl.textContent = 'Distance: 0 m | Time: 0 s';
+      setControlsEnabled(false);
+    }
+    statusEl.textContent = 'Deleted ' + filename + '.';
+  } catch (err) {
+    statusEl.textContent = 'Delete failed: ' + (err && err.message ? err.message : err);
   }
 }
 

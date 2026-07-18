@@ -91,6 +91,7 @@ MAP_TILE_MAX_ZOOM = required_env_int("MAP_TILE_MAX_ZOOM")
 SCREENSHOT_WIDTH = required_env_int("SCREENSHOT_WIDTH")
 SCREENSHOT_HEIGHT = required_env_int("SCREENSHOT_HEIGHT")
 CHUNK_SIZE_BYTES = required_env_int("CHUNK_SIZE_BYTES")
+CHUNK_UPLOAD_TTL_HOURS = required_env_int("CHUNK_UPLOAD_TTL_HOURS")
 
 if not FLASK_SECRET_KEY:
     raise RuntimeError(
@@ -231,6 +232,17 @@ def cleanup_chunk_upload(upload_id):
                 os.remove(path)
             except Exception:
                 pass
+
+
+def cleanup_old_chunk_uploads():
+    cutoff = datetime.now().timestamp() - (CHUNK_UPLOAD_TTL_HOURS * 60 * 60)
+    for name in os.listdir(CHUNK_UPLOAD_FOLDER):
+        path = os.path.join(CHUNK_UPLOAD_FOLDER, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except Exception:
+            pass
 
 
 def build_video_result(stored_name, original_filename):
@@ -408,7 +420,10 @@ def extract_gps_points(video_path):
             if "," not in line:
                 continue
             lat_str, lon_str = line.split(",")[:2]
-            pts.append({"lat": float(lat_str), "lon": float(lon_str)})
+            try:
+                pts.append({"lat": float(lat_str), "lon": float(lon_str)})
+            except ValueError:
+                continue
         return pts
     except FileNotFoundError:
         raise RuntimeError(
@@ -478,9 +493,13 @@ def upload():
 @app.route("/upload/start", methods=["POST"])
 @login_required
 def upload_start():
+    cleanup_old_chunk_uploads()
     data = request.get_json(silent=True) or {}
     filename = (data.get("filename") or "").strip()
-    total_size = int(data.get("total_size") or 0)
+    try:
+        total_size = int(data.get("total_size") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "File size must be a number"}), 400
 
     if not filename:
         return jsonify({"error": "Filename is required"}), 400
@@ -569,6 +588,28 @@ def upload_finish():
 def video(stored_name):
     """Streams an uploaded video by its unique stored name (see /upload)."""
     return send_from_directory(app.config["UPLOAD_FOLDER"], secure_filename(stored_name))
+
+
+@app.route("/video/<path:stored_name>", methods=["DELETE"])
+@login_required
+def delete_video(stored_name):
+    safe_name = secure_filename(stored_name)
+    if not safe_name:
+        return jsonify({"error": "Invalid video name"}), 400
+
+    video_path = os.path.abspath(os.path.join(app.config["UPLOAD_FOLDER"], safe_name))
+    upload_dir = os.path.abspath(app.config["UPLOAD_FOLDER"])
+    if os.path.dirname(video_path) != upload_dir:
+        return jsonify({"error": "Invalid video path"}), 400
+    if not os.path.exists(video_path):
+        return jsonify({"error": "Video not found"}), 404
+
+    try:
+        os.remove(video_path)
+        log_action(f"Deleted: {safe_name}")
+        return jsonify({"deleted": safe_name})
+    except OSError as e:
+        return jsonify({"error": f"Could not delete video: {e}"}), 500
 
 
 @app.errorhandler(413)

@@ -17,6 +17,7 @@ login.
 - Login gate with optional email notifications
 - Large-upload support with browser upload progress
 - Pause/resume upload between chunks
+- Delete uploaded videos from the server from the video list
 - Resizable sidebar, video panel, and map panel
 - 3D-style tilted map view toggle
 
@@ -24,6 +25,10 @@ login.
 
 Secrets are loaded from environment variables and should never be committed.
 The real `.env` file is ignored by Git.
+
+The app also enables CSRF checks for state-changing requests, HTTP-only session
+cookies, configurable secure cookie settings, and basic browser security
+headers.
 
 If this app was migrated from an older copy that had secrets in source code,
 rotate those credentials before deploying:
@@ -70,10 +75,21 @@ rotate those credentials before deploying:
 
    Open the host and port configured by `APP_HOST` and `APP_PORT`.
 
+## Production Run
+
+For production, keep `APP_DEBUG=false` and run with a WSGI server:
+
+```bash
+waitress-serve --host=0.0.0.0 --port=5000 wsgi:app
+```
+
+Set `SESSION_COOKIE_SECURE=true` when serving over HTTPS.
+
 ## Large Uploads
 
 - `MAX_UPLOAD_SIZE` controls the maximum request size.
 - `CHUNK_SIZE_BYTES` controls the upload chunk size used for pause/resume.
+- `CHUNK_UPLOAD_TTL_HOURS` controls cleanup for abandoned partial uploads.
 - `EXIFTOOL_TIMEOUT_SECONDS` controls how long GPS extraction may run.
 - If this app is behind Nginx, Apache, IIS, Cloudflare, or another proxy, that
   layer must also allow the same body size and a long enough request timeout.
@@ -82,8 +98,8 @@ rotate those credentials before deploying:
 
 ## Notes
 
-- Uploaded videos live in the configured `UPLOAD_FOLDER`; nothing is
-  auto-deleted.
+- Uploaded videos live in the configured `UPLOAD_FOLDER`. Use the Delete button
+  next to a video to remove it from the server.
 - Prev/Next Frame uses `ASSUMED_FPS` in the browser because browsers do not
   expose real frame counts consistently.
 - Screenshot dimensions are controlled by `SCREENSHOT_WIDTH` and
